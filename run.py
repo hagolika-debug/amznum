@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Amazon US/CA Number Generator + Validator (Brain Lead method)
-==============================================================
+Amazon US/CA/UK Number Generator + Validator (Brain Lead method)
+=================================================================
 
-Generates US or Canadian phone numbers and validates them on Amazon.in.
+Generates US, Canadian, or UK phone numbers and validates them on Amazon.in.
 Saves only VALID numbers to the output file, prefixed with '+'.
 
 Usage:
-    python3 run.py --target-valid 10000
-    python3 run.py --country ca --target-valid 5000
+    python3 run.py --country us --target-valid 10000
+    python3 run.py --country uk --target-valid 5000
     python3 run.py --count 50000 --threads 60
     python3 run.py --proxies config/proxies.txt
     python3 run.py --test-session
@@ -38,7 +38,7 @@ MAX_RETRIES = 3
 ROTATION_INTERVAL = 500
 SESSION_TTL_HOURS = 12
 
-OUT_DEFAULT = "valid_us_numbers.txt"
+OUT_DEFAULT = "valid_numbers.txt"
 
 # North American area codes (US and Canada)
 US_AREA_CODES = [
@@ -92,11 +92,33 @@ def log(msg):
 
 # --------------------------------------------------------------- generation
 def generate_numbers(count, country="us"):
-    """Generate unique 11-digit NANP numbers (1 + area + exchange + line)
-    for the given country ('us' or 'ca')."""
+    """
+    Generate unique numbers for the given country.
+    Returns a list of strings representing the number in international format
+    WITHOUT the leading '+', e.g.:
+      - US/CA: '1' + 10-digit NANP number (11 digits)
+      - UK:    '44' + 10-digit mobile number (12 digits)
+    """
+    if country == "uk":
+        seen, out = set(), []
+        attempts = 0
+        while len(out) < count:
+            attempts += 1
+            if attempts > count * 20:
+                break
+            # Generate a 10-digit mobile number starting with '7'
+            # e.g., 7xxxxxxxxx
+            mobile = "7" + "".join(str(random.randint(0, 9)) for _ in range(9))
+            num = "44" + mobile   # international format without +
+            if num not in seen:
+                seen.add(num)
+                out.append(num)
+        return out
+
+    # US or Canada – use area codes
     if country == "ca":
         codes = [str(c) for c in CANADA_AREA_CODES]
-    else:
+    else:  # default 'us'
         codes = [str(c) for c in US_AREA_CODES]
 
     seen, out = set(), []
@@ -414,11 +436,11 @@ def trim_output_file(path, target):
 # ---------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(
-        description="Generate US or Canadian numbers and validate them on Amazon.in "
+        description="Generate US, Canadian, or UK numbers and validate them on Amazon.in "
                     "(Brain Lead method). Saves only VALID hits, prefixed with '+'."
     )
-    ap.add_argument("--country", choices=["us", "ca"], default="us",
-                    help="country to generate numbers for (us or ca, default: us)")
+    ap.add_argument("--country", choices=["us", "ca", "uk"], default="us",
+                    help="country to generate numbers for (us, ca, uk; default: us)")
     ap.add_argument("--count", type=int, default=None,
                     help="total numbers to check (if not set, uses --target-valid * 20)")
     ap.add_argument("--target-valid", type=int, default=None,
