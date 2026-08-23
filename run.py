@@ -7,8 +7,9 @@ Generates US, Canadian, or UK phone numbers and validates them on Amazon.in.
 Saves only VALID numbers to the output file, prefixed with '+'.
 
 Usage:
-    python3 run.py --country us --target-valid 10000
-    python3 run.py --country uk --target-valid 5000
+    python3 run.py --country us --area-code 212 --target-valid 1000
+    python3 run.py --country ca --area-code 416 --count 50000
+    python3 run.py --country uk --area-code 75 --target-valid 500
     python3 run.py --count 50000 --threads 60
     python3 run.py --proxies config/proxies.txt
     python3 run.py --test-session
@@ -38,7 +39,7 @@ MAX_RETRIES = 3
 ROTATION_INTERVAL = 500
 SESSION_TTL_HOURS = 12
 
-OUT_DEFAULT = "valid_numbers.txt"
+OUT_DEFAULT = "valid_us_numbers.txt"
 
 # North American area codes (US and Canada)
 US_AREA_CODES = [
@@ -91,9 +92,12 @@ def log(msg):
 
 
 # --------------------------------------------------------------- generation
-def generate_numbers(count, country="us"):
+def generate_numbers(count, country="us", area_code=None):
     """
     Generate unique numbers for the given country.
+    If area_code is provided:
+      - for us/ca: it must be a valid 3-digit area code; numbers will use that area.
+      - for uk: it is used as a prefix for the mobile number (e.g., "7", "75").
     Returns a list of strings representing the number in international format
     WITHOUT the leading '+', e.g.:
       - US/CA: '1' + 10-digit NANP number (11 digits)
@@ -102,14 +106,34 @@ def generate_numbers(count, country="us"):
     if country == "uk":
         seen, out = set(), []
         attempts = 0
+        # Determine the prefix to use
+        if area_code is not None:
+            if not area_code.isdigit():
+                raise ValueError("UK area-code must be numeric digits (e.g., '75')")
+            prefix = area_code
+            # Ensure prefix starts with 7 (typical UK mobile)
+            if not prefix.startswith('7'):
+                log("WARNING: UK mobile numbers usually start with 7; prefix '%s' may not produce valid numbers" % prefix)
+            # Prefix length must be <= 10 because total mobile digits = 10
+            if len(prefix) > 10:
+                raise ValueError("UK mobile prefix cannot be longer than 10 digits")
+        else:
+            prefix = "7"  # default: all UK mobiles start with 7
+
         while len(out) < count:
             attempts += 1
             if attempts > count * 20:
                 break
-            # Generate a 10-digit mobile number starting with '7'
-            # e.g., 7xxxxxxxxx
-            mobile = "7" + "".join(str(random.randint(0, 9)) for _ in range(9))
-            num = "44" + mobile   # international format without +
+            # Generate remaining digits to make total 10 digits
+            remaining_len = 10 - len(prefix)
+            if remaining_len < 0:
+                raise ValueError("UK prefix too long (max 10 digits)")
+            if remaining_len > 0:
+                suffix = "".join(str(random.randint(0, 9)) for _ in range(remaining_len))
+            else:
+                suffix = ""
+            mobile = prefix + suffix
+            num = "44" + mobile
             if num not in seen:
                 seen.add(num)
                 out.append(num)
@@ -117,9 +141,19 @@ def generate_numbers(count, country="us"):
 
     # US or Canada – use area codes
     if country == "ca":
-        codes = [str(c) for c in CANADA_AREA_CODES]
+        all_codes = [str(c) for c in CANADA_AREA_CODES]
     else:  # default 'us'
-        codes = [str(c) for c in US_AREA_CODES]
+        all_codes = [str(c) for c in US_AREA_CODES]
+
+    if area_code is not None:
+        # Validate that it's a 3-digit code in the list
+        if not area_code.isdigit() or len(area_code) != 3:
+            raise ValueError("US/CA area code must be exactly 3 digits")
+        if area_code not in all_codes:
+            raise ValueError("Area code %s not found in the list for country %s" % (area_code, country))
+        codes = [area_code]
+    else:
+        codes = all_codes
 
     seen, out = set(), []
     attempts = 0
@@ -441,6 +475,9 @@ def main():
     )
     ap.add_argument("--country", choices=["us", "ca", "uk"], default="us",
                     help="country to generate numbers for (us, ca, uk; default: us)")
+    ap.add_argument("--area-code", metavar="CODE", default=None,
+                    help="For US/CA: 3-digit area code (e.g., 212). For UK: mobile prefix (e.g., 75). "
+                         "If omitted, random codes are used.")
     ap.add_argument("--count", type=int, default=None,
                     help="total numbers to check (if not set, uses --target-valid * 20)")
     ap.add_argument("--target-valid", type=int, default=None,
@@ -479,7 +516,9 @@ def main():
 
     log("Generating up to %d unique %s numbers (target valid = %s)"
         % (total_numbers, args.country.upper(), target if target is not None else "none"))
-    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10), args.country)
+    if args.area_code:
+        log("Restricting to area code/prefix: %s" % args.area_code)
+    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10), args.country, args.area_code)
     log("Generated %d numbers (out of %d requested)" % (len(numbers), total_numbers))
 
     checker = Checker(sm, pool)
