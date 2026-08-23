@@ -28,7 +28,7 @@ jobs:
           fi
 
       - name: Run script
-        run: python run.py
+        run: python3 run.py --target-valid 10000 --threads 30
 
       - name: Commit and push .txt files
         run: |
