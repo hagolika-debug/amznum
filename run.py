@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Amazon US Number Generator + Validator (Brain Lead method)
-===========================================================
+Amazon US/CA Number Generator + Validator (Brain Lead method)
+==============================================================
 
-Generates and validates US phone numbers on Amazon.com (or other marketplaces).
+Generates and validates US or Canadian phone numbers on Amazon marketplaces.
 Saves only VALID numbers to the output file, prefixed with '+'.
 
 Usage:
     python3 run.py --target-valid 10000
+    python3 run.py --country ca --target-valid 5000
     python3 run.py --count 50000 --threads 60
     python3 run.py --proxies config/proxies.txt
     python3 run.py --test-session
@@ -39,6 +40,7 @@ SESSION_TTL_HOURS = 12
 
 OUT_DEFAULT = "valid_us_numbers.txt"
 
+# North American area codes (US and Canada)
 US_AREA_CODES = [
     201, 202, 203, 205, 206, 207, 208, 209, 210, 212, 213, 214, 215, 216, 217, 218, 219,
     220, 223, 224, 225, 228, 229, 231, 234, 239, 240, 248, 251, 252, 253, 254, 256, 260,
@@ -58,6 +60,12 @@ US_AREA_CODES = [
     859, 860, 862, 863, 864, 865, 870, 878, 901, 903, 904, 906, 907, 908, 909, 910, 912,
     913, 914, 915, 916, 917, 918, 919, 920, 925, 928, 929, 931, 934, 936, 937, 940, 941,
     947, 949, 951, 952, 954, 956, 959, 970, 971, 972, 973, 978, 979, 980, 984, 985, 989,
+]
+
+CANADA_AREA_CODES = [
+    204, 226, 236, 249, 250, 289, 306, 343, 365, 387, 403, 416, 418, 428, 431, 437,
+    438, 450, 506, 514, 519, 548, 579, 581, 587, 604, 613, 639, 647, 705, 709, 742,
+    778, 780, 782, 807, 819, 825, 867, 873, 902, 905,
 ]
 
 USER_AGENTS = [
@@ -83,9 +91,14 @@ def log(msg):
 
 
 # --------------------------------------------------------------- generation
-def generate_numbers(count):
-    """Generate unique 11-digit NANP numbers (1 + area + exchange + line)."""
-    codes = [str(c) for c in US_AREA_CODES]
+def generate_numbers(count, country="us"):
+    """Generate unique 11-digit NANP numbers (1 + area + exchange + line)
+    for the given country ('us' or 'ca')."""
+    if country == "ca":
+        codes = [str(c) for c in CANADA_AREA_CODES]
+    else:
+        codes = [str(c) for c in US_AREA_CODES]
+
     seen, out = set(), []
     attempts = 0
     while len(out) < count:
@@ -401,20 +414,28 @@ def trim_output_file(path, target):
 # ---------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(
-        description="Generate US numbers and validate them on Amazon "
-                    "(Brain Lead method). Saves only VALID hits, prefixed with '+'.")
+        description="Generate US or Canadian numbers and validate them on Amazon "
+                    "(Brain Lead method). Saves only VALID hits, prefixed with '+'."
+    )
+    ap.add_argument("--country", choices=["us", "ca"], default="us",
+                    help="country to generate numbers for (us or ca, default: us)")
     ap.add_argument("--count", type=int, default=None,
                     help="total numbers to check (if not set, uses --target-valid * 20)")
     ap.add_argument("--target-valid", type=int, default=None,
                     help="stop after collecting this many valid numbers and trim output")
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
-    ap.add_argument("--domain", default="in",
-                    help="amazon marketplace: in, com, co.uk, de, ...")
+    ap.add_argument("--domain", default=None,
+                    help="amazon marketplace domain (e.g., com, ca, co.uk, de). "
+                         "If not set, defaults to 'com' for US, 'ca' for Canada.")
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--proxies", help="proxy list file (optional)")
     ap.add_argument("--test-session", action="store_true",
                     help="fetch one Amazon session and exit")
     args = ap.parse_args()
+
+    # Determine domain
+    if args.domain is None:
+        args.domain = "ca" if args.country == "ca" else "com"
 
     pool = ProxyPool(args.proxies)
     sm = SessionManager(args.domain, pool)
@@ -438,9 +459,9 @@ def main():
     else:
         target = args.target_valid
 
-    log("Generating up to %d unique US numbers (target valid = %s)"
-        % (total_numbers, target if target is not None else "none"))
-    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10))
+    log("Generating up to %d unique %s numbers (target valid = %s)"
+        % (total_numbers, args.country.upper(), target if target is not None else "none"))
+    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10), args.country)
     log("Generated %d numbers (out of %d requested)" % (len(numbers), total_numbers))
 
     checker = Checker(sm, pool)
