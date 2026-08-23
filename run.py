@@ -3,7 +3,7 @@
 Amazon US/CA Number Generator + Validator (Brain Lead method)
 ==============================================================
 
-Generates and validates US or Canadian phone numbers on Amazon marketplaces.
+Generates US or Canadian phone numbers and validates them on Amazon.in.
 Saves only VALID numbers to the output file, prefixed with '+'.
 
 Usage:
@@ -157,7 +157,7 @@ class ProxyPool:
 class SessionManager:
     """Dynamic session & CSRF token manager (Brain Lead method)."""
 
-    def __init__(self, domain="com", pool=None, timeout=15):
+    def __init__(self, domain="in", pool=None, timeout=15):
         tld = domain.split(".")[-1]
         self.base = "https://www.amazon.%s" % domain
         self.assoc = "inflex" if tld == "in" else "%s_flex" % tld
@@ -414,7 +414,7 @@ def trim_output_file(path, target):
 # ---------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(
-        description="Generate US or Canadian numbers and validate them on Amazon "
+        description="Generate US or Canadian numbers and validate them on Amazon.in "
                     "(Brain Lead method). Saves only VALID hits, prefixed with '+'."
     )
     ap.add_argument("--country", choices=["us", "ca"], default="us",
@@ -424,21 +424,17 @@ def main():
     ap.add_argument("--target-valid", type=int, default=None,
                     help="stop after collecting this many valid numbers and trim output")
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
-    ap.add_argument("--domain", default=None,
-                    help="amazon marketplace domain (e.g., com, ca, co.uk, de). "
-                         "If not set, defaults to 'com' for US, 'ca' for Canada.")
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--proxies", help="proxy list file (optional)")
     ap.add_argument("--test-session", action="store_true",
-                    help="fetch one Amazon session and exit")
+                    help="fetch one Amazon.in session and exit")
     args = ap.parse_args()
 
-    # Determine domain
-    if args.domain is None:
-        args.domain = "ca" if args.country == "ca" else "com"
+    # Always use Amazon.in for validation
+    domain = "in"
 
     pool = ProxyPool(args.proxies)
-    sm = SessionManager(args.domain, pool)
+    sm = SessionManager(domain, pool)
 
     if args.test_session:
         s = sm.get()
@@ -495,7 +491,7 @@ def main():
                       end="", flush=True)
 
     log("starting validation: %d threads -> amazon.%s"
-        % (args.threads, args.domain))
+        % (args.threads, domain))
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
