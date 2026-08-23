@@ -30,7 +30,7 @@ jobs:
           fi
 
       - name: Run script
-        run: python your_script.py
+        run: python run.py
 
       - name: Commit and push .txt files
         run: |
