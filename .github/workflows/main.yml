@@ -28,7 +28,7 @@ jobs:
           fi
 
       - name: Run script
-        run: python3 run.py --country ca --target-valid 10000 --threads 30
+        run: python3 run.py --country uk --target-valid 10000 --threads 30
 
       - name: Commit and push .txt files
         run: |
