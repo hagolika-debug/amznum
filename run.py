@@ -4,10 +4,10 @@ Amazon US Number Generator + Validator (Brain Lead method)
 ===========================================================
 
 Generates and validates US phone numbers on Amazon.com (or other marketplaces).
-Saves only VALID numbers to the output file.
+Saves only VALID numbers to the output file, prefixed with '+'.
 
 Usage:
-    python3 run.py --target-valid 10000 --threads 60
+    python3 run.py --target-valid 10000
     python3 run.py --count 50000 --threads 60
     python3 run.py --proxies config/proxies.txt
     python3 run.py --test-session
@@ -228,7 +228,7 @@ class SessionManager:
             self.counter += 1
             if self.session_data is None:
                 last_err = None
-                for attempt in range(1, 4):
+                for attempt in range(1, 5):          # extra retries for GitHub
                     try:
                         self.session_data = self._fetch_session()
                         log("session ready (token %s..., attempt %d)"
@@ -236,7 +236,7 @@ class SessionManager:
                         return self.session_data
                     except Exception as e:
                         last_err = e
-                        time.sleep(attempt * 2)
+                        time.sleep(attempt * 3)
                 raise RuntimeError("could not fetch Amazon session: %s" % last_err)
 
             if self.counter % ROTATION_INTERVAL == 0:
@@ -380,15 +380,33 @@ class Checker:
         return "UNKNOWN"
 
 
+# ------------------------------------------------------------------ file trimming
+def trim_output_file(path, target):
+    """Keep only the first `target` lines in the file."""
+    if target is None:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) <= target:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines[:target])
+        log("Trimmed output file to exactly %d lines (removed %d extras)"
+            % (target, len(lines) - target))
+    except Exception as e:
+        log("Failed to trim output file: %s" % e)
+
+
 # ---------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(
         description="Generate US numbers and validate them on Amazon "
-                    "(Brain Lead method). Saves only VALID hits.")
+                    "(Brain Lead method). Saves only VALID hits, prefixed with '+'.")
     ap.add_argument("--count", type=int, default=None,
                     help="total numbers to check (if not set, uses --target-valid * 20)")
     ap.add_argument("--target-valid", type=int, default=None,
-                    help="stop after collecting this many valid numbers")
+                    help="stop after collecting this many valid numbers and trim output")
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     ap.add_argument("--domain", default="in",
                     help="amazon marketplace: in, com, co.uk, de, ...")
@@ -420,7 +438,7 @@ def main():
     else:
         target = args.target_valid
 
-    log("Generating %d unique US numbers (target valid = %s)"
+    log("Generating up to %d unique US numbers (target valid = %s)"
         % (total_numbers, target if target is not None else "none"))
     numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10))
     log("Generated %d numbers (out of %d requested)" % (len(numbers), total_numbers))
@@ -441,7 +459,7 @@ def main():
             if verdict == "VALID":
                 with out_lock:
                     with open(args.out, "a", encoding="utf-8") as f:
-                        f.write(num + "\n")
+                        f.write("+" + num + "\n")   # add '+' prefix
                 # If we have a target and reached it, signal stop
                 if target is not None and stats["VALID"] >= target:
                     STOP.set()
@@ -481,6 +499,11 @@ def main():
         % (elapsed // 60, elapsed % 60,
            stats["checked"], stats["VALID"], args.out,
            stats["INVALID"], stats["UNKNOWN"]))
+
+    # Trim the output file to exactly the target number of lines
+    if target is not None:
+        trim_output_file(args.out, target)
+
     return 0
 
 
