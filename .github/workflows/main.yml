@@ -28,7 +28,7 @@ jobs:
           fi
 
       - name: Run script
-        run: python3 run.py --country us --area-code 580 --mobile-only --target-valid 10000
+        run: python3 run.py --country us --area-code 580 --carrier Verizon --target-valid 1000
 
       - name: Commit and push .txt files
         run: |
