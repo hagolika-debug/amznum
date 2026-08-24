@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 """
 Amazon US/CA/UK Number Generator + Validator (Brain Lead method)
-=================================================================
+================================================================
 
 Generates US, Canadian, or UK phone numbers and validates them on Amazon.in.
-Saves only VALID numbers to the output file, prefixed with '+'.
+Saves only VALID numbers to the output file (international format, e.g.
++12125550123).
+
+Generation modes:
+  default        random NANP exchanges (fast, but not guaranteed real)
+  --carrier X    real assigned NANPA central-office codes for carrier X
+                 (every number is a genuinely routable exchange)
+  --mobile-only  keep only exchanges assigned to wireless/mobile carriers,
+                 so every generated number is a real mobile line
+                 (combine with --carrier to restrict to one mobile carrier)
 
 Usage:
     python3 run.py --country us --area-code 212 --target-valid 1000
     python3 run.py --country ca --area-code 416 --count 50000
     python3 run.py --country uk --area-code 75 --target-valid 500
     python3 run.py --count 50000 --threads 60
+    python3 run.py --carrier Verizon --count 100000
+    python3 run.py --mobile-only --count 100000
+    python3 run.py --carrier T-Mobile --mobile-only --area-code 212
+    python3 run.py --list-carriers --area-code 212
     python3 run.py --proxies config/proxies.txt
     python3 run.py --test-session
 """
 
 import argparse
+import os
 import random
 import re
 import sys
@@ -39,7 +53,74 @@ MAX_RETRIES = 3
 ROTATION_INTERVAL = 500
 SESSION_TTL_HOURS = 12
 
-OUT_DEFAULT = "valid_us_numbers.txt"
+OUT_DEFAULT = "valid_numbers.txt"
+
+# Real NANPA central-office code assignments (assigned NPA-NXX), converted
+# from the official NANPA CoCodeAssignment_Utilized_AllStates_Public data.
+# Every NPA-NXX below is an assigned exchange, so generated numbers are
+# genuinely routable (Brain Lead's generator supports this "carrier" mode).
+NANPA_CSV_PATHS = [
+    "npa-nxx-companytype-ocn.csv",
+    "data/npa-nxx-companytype-ocn.csv",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "brain_lead_source_recovered", "data",
+                 "npa-nxx-companytype-ocn.csv"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "brain_lead_source_recovered", "npa-nxx-companytype-ocn.csv"),
+]
+
+
+def _load_nanpa_assignments(area_code=None, carrier=None, mobile_only=False):
+    """Load assigned NANPA NPA-NXX pairs (npa_nxx -> (company, state)).
+
+    Returns {} if the CSV is unavailable (falls back to random exchange
+    generation). Mirrors Brain Lead's load_carrier_prefixes() logic.
+
+    mobile_only keeps only exchanges assigned to wireless/mobile carriers
+    (NANPA's public file only marks AS/UA, not line type, so "mobile" is
+    inferred from the carrier being a wireless provider)."""
+    import csv
+    for path in NANPA_CSV_PATHS:
+        if not os.path.exists(path):
+            continue
+        out = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for row in csv.reader(f):
+                    if len(row) < 8 or not row[0].isdigit():
+                        continue
+                    npa, nxx, line_type, ocn, company, rate_center, unknown, state = (
+                        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7])
+                    if area_code and npa != area_code:
+                        continue
+                    if carrier and carrier.lower() not in company.lower():
+                        continue
+                    if mobile_only and not _is_mobile_carrier(company):
+                        continue
+                    out["%s%s" % (npa, nxx)] = (company, state)
+        except OSError:
+            continue
+        return out
+    return {}
+
+
+# Wireless/mobile carrier name patterns. NANPA's public file only records
+# AS/UA (assigned/unassigned), so mobile exchanges are identified by their
+# carrier being a wireless provider.
+MOBILE_CARRIER_PATTERNS = [
+    "VERIZON WIRELESS", "CELLCO PARTNERSHIP", "T-MOBILE", "AT&T MOBILITY",
+    "AT&T CELLULAR", "CINGULAR", "SPRINT", "METROPCS", "BOOST MOBILE",
+    "CRICKET", "US CELLULAR", "C SPIRE", "XFINITY MOBILE", "MOBILY",
+    "WIRELESS", "PCS", "MOBILE", "CELLULAR", "AMERICAN SPECTRUM",
+    "NEW CINGULAR", "OMNIPOINT", "VOICESTREAM", "MOHAWK", "NEXTEL",
+    "DIGITAL COMMUNICATIONS",
+]
+
+
+def _is_mobile_carrier(company):
+    c = company.upper()
+    return any(p in c for p in MOBILE_CARRIER_PATTERNS)
+
 
 # North American area codes (US and Canada)
 US_AREA_CODES = [
@@ -92,12 +173,18 @@ def log(msg):
 
 
 # --------------------------------------------------------------- generation
-def generate_numbers(count, country="us", area_code=None):
+def generate_numbers(count, country="us", area_code=None, carrier=None, mobile_only=False):
     """
     Generate unique numbers for the given country.
     If area_code is provided:
       - for us/ca: it must be a valid 3-digit area code; numbers will use that area.
       - for uk: it is used as a prefix for the mobile number (e.g., "7", "75").
+    If carrier is provided (US/CA): numbers are generated from real assigned
+    NANPA central-office codes (NPA-NXX) for that carrier, so every generated
+    number is a genuinely routable exchange (Brain Lead "carrier" mode).
+    If mobile_only is True (US/CA): only wireless/mobile carrier exchanges are
+    used, so every generated number is a real mobile line (NANPA's public file
+    only marks AS/UA, so "mobile" is inferred from the carrier name).
     Returns a list of strings representing the number in international format
     WITHOUT the leading '+', e.g.:
       - US/CA: '1' + 10-digit NANP number (11 digits)
@@ -155,6 +242,27 @@ def generate_numbers(count, country="us", area_code=None):
     else:
         codes = all_codes
 
+    # --- Brain Lead "carrier" mode: use real assigned central-office codes ---
+    assignments = _load_nanpa_assignments(area_code, carrier, mobile_only)
+    if assignments:
+        keys = [k for k in assignments if k[:3] in codes]
+        if keys:
+            seen, out = set(), []
+            attempts = 0
+            while len(out) < count:
+                attempts += 1
+                if attempts > count * 20:
+                    break
+                npanxx = random.choice(keys)
+                line = "%04d" % random.randint(0, 9999)
+                num = "1" + npanxx + line
+                if num not in seen:
+                    seen.add(num)
+                    out.append(num)
+            return out
+        log("no assigned NPA-NXX for the chosen area code(s) - using random exchanges")
+
+    # Fallback: random exchange (NANPA data missing)
     seen, out = set(), []
     attempts = 0
     while len(out) < count:
@@ -169,6 +277,26 @@ def generate_numbers(count, country="us", area_code=None):
             seen.add(num)
             out.append(num)
     return out
+
+
+def list_carriers(area_code=None, mobile_only=False):
+    """Print carrier names present in the NANPA assignment data."""
+    import csv
+    names = set()
+    for path in NANPA_CSV_PATHS:
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for row in csv.reader(f):
+                if len(row) < 8 or not row[0].isdigit():
+                    continue
+                if area_code and row[0] != area_code:
+                    continue
+                if mobile_only and not _is_mobile_carrier(row[4]):
+                    continue
+                names.add(row[4].strip().strip('"'))
+        break
+    return sorted(names)
 
 
 # ------------------------------------------------------------------- proxies
@@ -478,6 +606,15 @@ def main():
     ap.add_argument("--area-code", metavar="CODE", default=None,
                     help="For US/CA: 3-digit area code (e.g., 212). For UK: mobile prefix (e.g., 75). "
                          "If omitted, random codes are used.")
+    ap.add_argument("--carrier", default=None,
+                    help="US/CA only: generate from real assigned NANPA central-office "
+                         "codes for this carrier (e.g., Verizon, T-Mobile). "
+                         "Use --list-carriers to see options.")
+    ap.add_argument("--mobile-only", action="store_true",
+                    help="US/CA only: keep only exchanges assigned to wireless/mobile "
+                         "carriers, so every generated number is a real mobile line.")
+    ap.add_argument("--list-carriers", action="store_true",
+                    help="List carrier names in the NANPA assignment data and exit")
     ap.add_argument("--count", type=int, default=None,
                     help="total numbers to check (if not set, uses --target-valid * 20)")
     ap.add_argument("--target-valid", type=int, default=None,
@@ -491,6 +628,17 @@ def main():
 
     # Always use Amazon.in for validation
     domain = "in"
+
+    if args.list_carriers:
+        names = list_carriers(args.area_code, args.mobile_only)
+        log("%d %s carriers in NANPA assignment data%s"
+            % (len(names), "mobile" if args.mobile_only else "all",
+               " for area code %s" % args.area_code if args.area_code else ""))
+        for n in names[:40]:
+            print("  - %s" % n)
+        if len(names) > 40:
+            print("  ... and %d more" % (len(names) - 40))
+        return 0
 
     pool = ProxyPool(args.proxies)
     sm = SessionManager(domain, pool)
@@ -518,7 +666,12 @@ def main():
         % (total_numbers, args.country.upper(), target if target is not None else "none"))
     if args.area_code:
         log("Restricting to area code/prefix: %s" % args.area_code)
-    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10), args.country, args.area_code)
+    if args.carrier:
+        log("Using real assigned NANPA central-office codes for: %s" % args.carrier)
+    if args.mobile_only:
+        log("Mobile-only: restricting to wireless carrier exchanges")
+    numbers = generate_numbers(min(total_numbers, DEFAULT_COUNT * 10), args.country,
+                               args.area_code, args.carrier, args.mobile_only)
     log("Generated %d numbers (out of %d requested)" % (len(numbers), total_numbers))
 
     checker = Checker(sm, pool)
